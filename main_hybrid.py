@@ -164,96 +164,269 @@ class GitGatekeeper:
         self.run(["add", "."])
         self.run(["commit", "-m", f"Agent: {message}"])
 
-# --- 4. FLOW ENGINEER (The Agentic Loop) ---
-class FlowEngineer:
-    def __init__(self):
+# --- 4. MEMORY MANAGER (The Scribe) ---
+class MemoryManager:
+    def __init__(self, memory_file="agent_memory.json"):
+        self.memory_file = Path(memory_file)
+        self.memories = self._load_memories()
+
+    def _load_memories(self):
+        if self.memory_file.exists():
+            with open(self.memory_file, 'r') as f:
+                return json.load(f)
+        return []
+
+    def save_experience(self, task: str, success: bool, solution: str):
+        experience = {
+            "timestamp": datetime.now().isoformat(),
+            "task": task,
+            "success": success,
+            "solution": solution,
+        }
+        self.memories.append(experience)
+        with open(self.memory_file, 'w') as f:
+            json.dump(self.memories, f, indent=2)
+        print("   📝 Experience saved to memory.")
+
+    def find_similar_experiences(self, task: str, top_k=2):
+        # Simple keyword-based similarity for now.
+        # A more advanced implementation would use embeddings.
+        task_keywords = set(task.lower().split())
+
+        scored_memories = []
+        for mem in self.memories:
+            mem_keywords = set(mem['task'].lower().split())
+            score = len(task_keywords.intersection(mem_keywords))
+            if score > 0:
+                scored_memories.append({"score": score, "memory": mem})
+
+        scored_memories.sort(key=lambda x: x['score'], reverse=True)
+        return [item['memory'] for item in scored_memories[:top_k]]
+
+# --- 5. MULTI-AGENT COLLABORATION FRAMEWORK ---
+class SharedContext:
+    """A structured scratchpad for agents to read from and write to."""
+    def __init__(self, task, target_file, repo_map, similar_experiences):
+        self.task = task
+        self.target_file = target_file
+        self.repo_map = repo_map
+        self.similar_experiences = similar_experiences
+        self.plan = ""
+        self.test_code = ""
+        self.solution_code = ""
+        self.critique = ""
+        self.error_log = ""
+        self.current_state = "PLANNING" # Initial state
+
+    def __str__(self):
+        return f"**Context**:\n- Task: {self.task}\n- State: {self.current_state}\n- Plan: {'Yes' if self.plan else 'No'}\n- Test: {'Yes' if self.test_code else 'No'}"
+
+# Agent Personas and System Prompts
+AGENT_PERSONAS = {
+    "ARCHITECT": {
+        "role": "Architect",
+        "system_prompt": """
+You are a Senior Software Architect. Create a detailed, multi-step YAML execution plan.
+Incorporate lessons from past experiences. A good plan is critical.
+Output a strict YAML with `thought_process`, `edge_cases`, and `plan` sections.
+"""
+    },
+    "VALIDATOR": {
+        "role": "Validator",
+        "system_prompt": """
+You are a Plan Validator. Review a YAML plan.
+If it is logical, feasible, and detailed, respond with "APPROVED".
+Otherwise, provide a brief, constructive critique.
+"""
+    },
+    "QA_ENGINEER": {
+        "role": "QA Engineer",
+        "system_prompt": "You are a Test Engineer. Write a Python script 'repro_test.py' based on the plan. It must fail if the feature is not implemented and pass if it is."
+    },
+    "CODER": {
+        "role": "Python Dev",
+        "system_prompt": "You are a Senior Python Developer. Write the full code for the target file to pass the test harness. You must respond with only the code."
+    },
+    "DEBUGGER": {
+        "role": "Debugger",
+        "system_prompt": "You are a Debugger. Your previous code failed. Analyze the error and the test harness, then rewrite the full code to fix the issue. Respond with only the code."
+    },
+    "AUDITOR": {
+        "role": "Auditor",
+        "system_prompt": "You are a Security and Style Auditor. Review the final code for security vulnerabilities, style issues, and adherence to the plan. Provide a brief review."
+    },
+    "REFACTOR_AGENT": {
+        "role": "Python Dev",
+        "system_prompt": "You are a Refactoring Agent. Your task is to rewrite the given Python code to fix all issues reported by the flake8 linter. Respond with only the full, corrected code."
+    }
+}
+
+class Agent:
+    """A generic agent that can perform a single turn."""
+    def __init__(self, persona: Dict[str, str], ai_client: HybridAIClient):
+        self.persona = persona
+        self.ai = ai_client
+
+    def execute_turn(self, context: SharedContext, user_prompt: str) -> str:
+        """Generates a response based on the agent's persona and the shared context."""
+        return self.ai.generate(
+            role=self.persona["role"],
+            system_prompt=self.persona["system_prompt"],
+            user_prompt=user_prompt
+        )
+
+class TeamManager:
+    def __init__(self, task, target_file):
         self.ai = HybridAIClient()
+        self.memory = MemoryManager()
         self.workspace = Path(WORKSPACE_DIR)
-        self.workspace.mkdir(exist_ok=True)
-        self.load_map()
 
-    def load_map(self):
-        if not os.path.exists(REPO_MAP_FILE):
-            RepoCartographer().map_repo()
-        with open(REPO_MAP_FILE) as f:
-            self.map = json.load(f)
+        repo_map = self._load_map()
+        similar_experiences = self.memory.find_similar_experiences(task)
+        self.context = SharedContext(task, target_file, repo_map, similar_experiences)
 
-    def write_file(self, filename, content):
+        self.agents = {name: Agent(persona, self.ai) for name, persona in AGENT_PERSONAS.items()}
+
+    def _load_map(self):
+        repo_map_path = Path(REPO_MAP_FILE)
+        if not repo_map_path.exists():
+            return RepoCartographer().map_repo()
+        with open(repo_map_path) as f:
+            return json.load(f)
+
+    def execute_workflow(self):
+        print(f"\n🚀 STARTING Agent Team for: {self.context.task}")
+
+        while self.context.current_state not in ["DONE", "FAILED"]:
+            print(f"\n--- Current State: {self.context.current_state} ---")
+
+            if self.context.current_state == "PLANNING":
+                self._planning_phase()
+            elif self.context.current_state == "GENERATE_TESTS":
+                self._test_generation_phase()
+            elif self.context.current_state == "CODING":
+                self._coding_phase()
+            elif self.context.current_state == "REFACTORING":
+                self._refactoring_phase()
+            elif self.context.current_state == "AUDIT":
+                self._audit_phase()
+
+        if self.context.current_state == "DONE":
+            print("✅ Workflow Complete.")
+            self.memory.save_experience(self.context.task, True, self.context.solution_code)
+            return True
+        else:
+            print("❌ Workflow Failed.")
+            self.memory.save_experience(self.context.task, False, self.context.solution_code)
+            return False
+
+    def _planning_phase(self):
+        experiential_context = "\n".join([f"- Task: {exp['task']}\n  Success: {exp['success']}\n  Solution:\n```python\n{exp['solution']}\n```" for exp in self.context.similar_experiences])
+
+        for i in range(MAX_RETRIES):
+            plan_prompt = f"Similar Past Experiences:\n{experiential_context}\n\nCodebase Map:\n{str(self.context.repo_map)[:3000]}\n\nTarget: `{self.context.target_file}`\nRequest: \"{self.context.task}\"\nPrior Critique: {self.context.critique}\n\nGenerate or revise the YAML execution plan."
+            plan = self.agents["ARCHITECT"].execute_turn(self.context, plan_prompt)
+
+            validation_prompt = f"Please validate this plan:\n\n---\n{plan}\n---"
+            validation = self.agents["VALIDATOR"].execute_turn(self.context, validation_prompt)
+
+            if "APPROVED" in validation.upper():
+                print(f"   ✅ Plan Approved on attempt {i+1}.")
+                self.context.plan = plan
+                self.context.current_state = "GENERATE_TESTS"
+                return
+            else:
+                self.context.critique = validation
+                print(f"   🟠 Plan Rejected. Critique: {self.context.critique}")
+
+        print("   💀 Max retries reached for planning.")
+        self.context.current_state = "FAILED"
+
+    def _test_generation_phase(self):
+        test_prompt = f"Plan: {self.context.plan}\nWrite a Python script 'repro_test.py' that reproduces the issue or validates the new feature. It MUST fail initially."
+        self.context.test_code = self.agents["QA_ENGINEER"].execute_turn(self.context, test_prompt)
+        self._write_to_workspace("repro_test.py", self.context.test_code)
+        print("   ✅ Test Harness Created.")
+        self.context.current_state = "CODING"
+
+    def _coding_phase(self):
+        experiential_context = "\n".join([f"- Task: {exp['task']}\n  Success: {exp['success']}\n  Solution:\n```python\n{exp['solution']}\n```" for exp in self.context.similar_experiences])
+
+        for i in range(MAX_RETRIES):
+            if i == 0:
+                code_prompt = f"Plan:\n{self.context.plan}\n\nTest Harness:\n{self.context.test_code}\n\nWrite the full code for `{self.context.target_file}` to pass the test."
+                agent = self.agents["CODER"]
+            else:
+                code_prompt = f"Your previous code failed the tests.\nError:\n{self.context.error_log}\n\nTest Harness:\n{self.context.test_code}\n\nRewrite the full code for `{self.context.target_file}` to fix the error."
+                agent = self.agents["DEBUGGER"]
+
+            solution = agent.execute_turn(self.context, code_prompt)
+            self.context.solution_code = solution
+            self._write_to_workspace("solution.py", solution)
+
+            res = subprocess.run(["python", "repro_test.py"], cwd=self.workspace, capture_output=True, text=True, timeout=10)
+            if res.returncode == 0:
+                print(f"   🎉 SUCCESS! Tests Passed on attempt {i+1}.")
+                self.context.current_state = "REFACTORING"
+                return
+            else:
+                print(f"   ❌ Test Failed. Retrying...")
+                self.context.error_log = res.stderr + res.stdout
+
+        print("   💀 Max retries reached for coding.")
+        self.context.current_state = "FAILED"
+
+    def _refactoring_phase(self):
+        for i in range(MAX_RETRIES):
+            lint_results = self._run_linter(self.workspace / "solution.py")
+            if not lint_results:
+                print("   ✅ Linter passed.")
+                self.context.current_state = "AUDIT"
+                return
+
+            print(f"   🟠 Linter found issues:\n{lint_results}")
+
+            refactor_prompt = f"The following code has linting errors:\n\n```python\n{self.context.solution_code}\n```\n\nLinter Output:\n{lint_results}\n\nPlease rewrite the full code to fix these issues."
+
+            new_code = self.agents["REFACTOR_AGENT"].execute_turn(self.context, refactor_prompt)
+            self.context.solution_code = new_code
+            self._write_to_workspace("solution.py", new_code)
+
+            # Re-run tests to ensure refactoring didn't break anything
+            res = subprocess.run(["python", "repro_test.py"], cwd=self.workspace, capture_output=True, text=True, timeout=10)
+            if res.returncode != 0:
+                print("   ❌ Refactoring broke the tests. Failing workflow.")
+                self.context.current_state = "FAILED"
+                return
+
+            print("   ✅ Refactoring successful and tests still pass.")
+
+        print("   💀 Max retries reached for refactoring.")
+        self.context.current_state = "AUDIT" # Proceed to audit even if linting fails
+
+    def _audit_phase(self):
+        audit_prompt = f"Code:\n{self.context.solution_code}"
+        self.context.critique = self.agents["AUDITOR"].execute_turn(self.context, audit_prompt)
+        print(f"   🔍 Auditor's Review: {self.context.critique}")
+        self.context.current_state = "DONE"
+
+    def _write_to_workspace(self, filename, content):
         clean_content = content.replace("```python", "").replace("```", "").strip()
         with open(self.workspace / filename, "w") as f:
             f.write(clean_content)
 
-    def execute(self, task, target_file):
-        print(f"\n🚀 STARTED Hybrid Agent on: {target_file}")
+    def _run_linter(self, file_path):
+        try:
+            result = subprocess.run(
+                ["flake8", str(file_path)],
+                capture_output=True,
+                text=True,
+            )
+            return result.stdout.strip()
+        except FileNotFoundError:
+            return "flake8 not found. Please install it with 'pip install flake8'."
 
-        # 1. ARCHITECT & VALIDATOR: Planning Loop
-        print("   🤝 Entering Planning Loop...")
-        system_prompt_architect = """
-You are a Senior Software Architect. Your task is to create a detailed, multi-step execution plan to solve a user's request.
-You must output the plan in a strict YAML format. The plan should contain a `thought_process`, `edge_cases`, and a `plan` with a sequence of file modifications.
-"""
-        system_prompt_validator = """
-You are a Plan Validator. Your task is to review a YAML plan.
-If the plan is logical, feasible, and detailed enough to implement, respond with only the word "APPROVED".
-If the plan is flawed, provide a brief, constructive critique of why it is flawed so the Architect can revise it. Do not approve plans that are too vague or miss obvious steps.
-"""
-
-        plan = ""
-        critique = ""
-        for i in range(MAX_RETRIES):
-            plan_prompt = f"Codebase Map:\n{str(self.map)[:4000]}\nTarget: `{target_file}`\nRequest: \"{task}\"\nPrior Critique: {critique}\n\nGenerate or revise the YAML execution plan."
-            plan = self.ai.generate("Architect", system_prompt_architect, plan_prompt)
-
-            validation_prompt = f"Please validate the following plan:\n\n---\n{plan}\n---"
-            validation = self.ai.generate("Validator", system_prompt_validator, validation_prompt)
-
-            if "APPROVED" in validation.upper():
-                print(f"   ✅ Plan Approved on attempt {i+1}.")
-                self.write_file("plan.yaml", plan)
-                break
-            else:
-                critique = validation
-                print(f"   🟠 Plan Rejected. Critique: {critique}")
-        else:
-            print("   💀 Max retries reached for planning. Aborting.")
-            return False
-
-        # 2. QA ENGINEER: Test Harness
-        test_prompt = f"Plan: {plan}\nWrite a Python script 'repro_test.py' that reproduces the issue or validates the new feature. It MUST fail initially."
-        test_code = self.ai.generate("QA Engineer", "You are a Test Engineer. Write strict tests.", test_prompt)
-        self.write_file("repro_test.py", test_code)
-        print("   ✅ Test Harness Created.")
-
-        # 3. DEV & REFLEXION LOOP
-        print("   🔄 Entering Reflexion Loop...")
-        for i in range(MAX_RETRIES):
-            # Write/Fix Code
-            if i == 0:
-                code_prompt = f"Plan: {plan}\nTest: {test_code}\nWrite the solution for {target_file}."
-                context = "Initial Code Generation."
-            else:
-                code_prompt = f"Previous code failed tests.\nError: {error_log}\nFix the code."
-                context = f"Fixing Attempt #{i+1}"
-
-            solution = self.ai.generate("Python Dev", f"You are a Senior Python Dev. {context}", code_prompt)
-            self.write_file("solution.py", solution)
-
-            # Run Test
-            res = subprocess.run(["python", "repro_test.py"], cwd=self.workspace, capture_output=True, text=True, timeout=10)
-            if res.returncode == 0:
-                print(f"   🎉 SUCCESS! Tests Passed on attempt {i+1}.")
-                # 4. CRITIC: Final Review
-                critique = self.ai.generate("Auditor", "Check for security/style.", f"Code: {solution}")
-                self.write_file("review.md", critique)
-                return True
-            else:
-                print(f"   ❌ Test Failed. Retrying...")
-                error_log = res.stderr + res.stdout
-
-        print("   💀 Max retries reached.")
-        return False
-
-# --- 5. MAIN ENTRY POINT ---
+# --- 6. MAIN ENTRY POINT ---
 def main():
     parser = argparse.ArgumentParser(description="Hybrid Neuro-Symbolic Agent")
     parser.add_argument("file", help="Target file to modify")
@@ -261,7 +434,8 @@ def main():
     parser.add_argument("--remap", action="store_true", help="Force regenerate repo map")
     args = parser.parse_args()
 
-    if args.remap: os.remove(REPO_MAP_FILE)
+    if args.remap and Path(REPO_MAP_FILE).exists():
+        os.remove(REPO_MAP_FILE)
 
     # Initialize System
     git = GitGatekeeper()
@@ -272,12 +446,12 @@ def main():
         branch = git.create_branch(args.instruction)
 
         # Run Logic
-        engine = FlowEngineer()
-        success = engine.execute(args.instruction, args.file)
+        manager = TeamManager(args.instruction, args.file)
+        success = manager.execute_workflow()
 
         if success:
             # Move from Sandbox to Real Repo
-            src = Path(WORKSPACE_DIR) / "solution.py"
+            src = manager.workspace / "solution.py"
             dst = Path(args.file)
             shutil.copy(src, dst)
             print(f"   🚚 Transplanted solution to {dst}")
