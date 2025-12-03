@@ -66,6 +66,20 @@ To add a database connection pool with a retry mechanism to a file named `src/da
 python main_hybrid.py src/database.py "Add a connection pool with a retry mechanism for timeout errors"
 ```
 
+## Benchmarking
+
+To measure the agent's performance and track its improvement over time, a benchmarking framework is included.
+
+### How to Run the Benchmark
+
+To run the full suite of benchmark tasks, execute the following command:
+
+```bash
+python benchmark_runner.py
+```
+
+The runner will execute each task defined in `benchmark/tasks.json`, run a separate validation test to confirm the correctness of the agent's solution, and print a summary report of the results.
+
 ### The Agentic Flow
 
 When you run the command, the agent executes the following "Deep Logic Flow":
