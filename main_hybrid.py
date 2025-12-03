@@ -164,50 +164,10 @@ class GitGatekeeper:
         self.run(["add", "."])
         self.run(["commit", "-m", f"Agent: {message}"])
 
-# --- 4. MEMORY MANAGER (The Scribe) ---
-class MemoryManager:
-    def __init__(self, memory_file="agent_memory.json"):
-        self.memory_file = Path(memory_file)
-        self.memories = self._load_memories()
-
-    def _load_memories(self):
-        if self.memory_file.exists():
-            with open(self.memory_file, 'r') as f:
-                return json.load(f)
-        return []
-
-    def save_experience(self, task: str, success: bool, solution: str):
-        experience = {
-            "timestamp": datetime.now().isoformat(),
-            "task": task,
-            "success": success,
-            "solution": solution,
-        }
-        self.memories.append(experience)
-        with open(self.memory_file, 'w') as f:
-            json.dump(self.memories, f, indent=2)
-        print("   📝 Experience saved to memory.")
-
-    def find_similar_experiences(self, task: str, top_k=2):
-        # Simple keyword-based similarity for now.
-        # A more advanced implementation would use embeddings.
-        task_keywords = set(task.lower().split())
-
-        scored_memories = []
-        for mem in self.memories:
-            mem_keywords = set(mem['task'].lower().split())
-            score = len(task_keywords.intersection(mem_keywords))
-            if score > 0:
-                scored_memories.append({"score": score, "memory": mem})
-
-        scored_memories.sort(key=lambda x: x['score'], reverse=True)
-        return [item['memory'] for item in scored_memories[:top_k]]
-
-# --- 5. FLOW ENGINEER (The Agentic Loop) ---
+# --- 4. FLOW ENGINEER (The Agentic Loop) ---
 class FlowEngineer:
     def __init__(self):
         self.ai = HybridAIClient()
-        self.memory = MemoryManager()
         self.workspace = Path(WORKSPACE_DIR)
         self.workspace.mkdir(exist_ok=True)
         self.load_map()
@@ -226,28 +186,25 @@ class FlowEngineer:
     def execute(self, task, target_file):
         print(f"\n🚀 STARTED Hybrid Agent on: {target_file}")
 
-        # 1. RETRIEVE & PLAN: Architect and Validator Loop
+        # 1. ARCHITECT & VALIDATOR: Planning Loop
         print("   🤝 Entering Planning Loop...")
-        similar_experiences = self.memory.find_similar_experiences(task)
-        experiential_context = "\n".join([f"- Task: {exp['task']}\n  Success: {exp['success']}\n  Solution:\n```python\n{exp['solution']}\n```" for exp in similar_experiences])
-
         system_prompt_architect = """
-You are a Senior Software Architect. Your task is to create a detailed, multi-step execution plan.
-Incorporate lessons from past experiences to improve your plan. A good plan is the most critical step to success.
-Output the plan in a strict YAML format with `thought_process`, `edge_cases`, and `plan` sections.
+You are a Senior Software Architect. Your task is to create a detailed, multi-step execution plan to solve a user's request.
+You must output the plan in a strict YAML format. The plan should contain a `thought_process`, `edge_cases`, and a `plan` with a sequence of file modifications.
 """
         system_prompt_validator = """
 You are a Plan Validator. Your task is to review a YAML plan.
-If the plan is logical, feasible, and detailed, respond with "APPROVED".
-Otherwise, provide a brief, constructive critique.
+If the plan is logical, feasible, and detailed enough to implement, respond with only the word "APPROVED".
+If the plan is flawed, provide a brief, constructive critique of why it is flawed so the Architect can revise it. Do not approve plans that are too vague or miss obvious steps.
 """
+
         plan = ""
         critique = ""
         for i in range(MAX_RETRIES):
-            plan_prompt = f"Similar Past Experiences:\n{experiential_context}\n\nCodebase Map:\n{str(self.map)[:3000]}\n\nTarget: `{target_file}`\nRequest: \"{task}\"\nPrior Critique: {critique}\n\nGenerate or revise the YAML execution plan."
+            plan_prompt = f"Codebase Map:\n{str(self.map)[:4000]}\nTarget: `{target_file}`\nRequest: \"{task}\"\nPrior Critique: {critique}\n\nGenerate or revise the YAML execution plan."
             plan = self.ai.generate("Architect", system_prompt_architect, plan_prompt)
 
-            validation_prompt = f"Please validate this plan:\n\n---\n{plan}\n---"
+            validation_prompt = f"Please validate the following plan:\n\n---\n{plan}\n---"
             validation = self.ai.generate("Validator", system_prompt_validator, validation_prompt)
 
             if "APPROVED" in validation.upper():
@@ -259,7 +216,6 @@ Otherwise, provide a brief, constructive critique.
                 print(f"   🟠 Plan Rejected. Critique: {critique}")
         else:
             print("   💀 Max retries reached for planning. Aborting.")
-            self.memory.save_experience(task, False, "") # Save failure
             return False
 
         # 2. QA ENGINEER: Test Harness
@@ -270,17 +226,16 @@ Otherwise, provide a brief, constructive critique.
 
         # 3. DEV & REFLEXION LOOP
         print("   🔄 Entering Reflexion Loop...")
-        solution = ""
         for i in range(MAX_RETRIES):
             # Write/Fix Code
             if i == 0:
-                code_prompt = f"Similar Past Experiences:\n{experiential_context}\n\nPlan:\n{plan}\n\nTest Harness:\n{test_code}\n\nWrite the full code for `{target_file}` to pass the test."
+                code_prompt = f"Plan: {plan}\nTest: {test_code}\nWrite the solution for {target_file}."
                 context = "Initial Code Generation."
             else:
-                code_prompt = f"Similar Past Experiences:\n{experiential_context}\n\nYour previous code failed the tests.\nError:\n{error_log}\n\nTest Harness:\n{test_code}\n\nRewrite the full code for `{target_file}` to fix the error."
+                code_prompt = f"Previous code failed tests.\nError: {error_log}\nFix the code."
                 context = f"Fixing Attempt #{i+1}"
 
-            solution = self.ai.generate("Python Dev", f"You are a Senior Python Developer. {context}", code_prompt)
+            solution = self.ai.generate("Python Dev", f"You are a Senior Python Dev. {context}", code_prompt)
             self.write_file("solution.py", solution)
 
             # Run Test
@@ -290,14 +245,12 @@ Otherwise, provide a brief, constructive critique.
                 # 4. CRITIC: Final Review
                 critique = self.ai.generate("Auditor", "Check for security/style.", f"Code: {solution}")
                 self.write_file("review.md", critique)
-                self.memory.save_experience(task, True, solution)
                 return True
             else:
                 print(f"   ❌ Test Failed. Retrying...")
                 error_log = res.stderr + res.stdout
 
         print("   💀 Max retries reached.")
-        self.memory.save_experience(task, False, solution)
         return False
 
 # --- 5. MAIN ENTRY POINT ---

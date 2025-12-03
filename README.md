@@ -64,9 +64,8 @@ python main_hybrid.py src/database.py "Add a connection pool with a retry mechan
 When you run the command, the agent executes the following "Deep Logic Flow":
 
 1.  **Safety First:** A new Git branch is created to sandbox the operation, ensuring your main branch remains clean.
-2.  **Memory Retrieval:** The agent searches its long-term memory (`agent_memory.json`) for experiences from similar, past tasks. These experiences (both successes and failures) are used to provide context to the AI models, helping them avoid past mistakes and reuse successful strategies.
-3.  **Mapping:** The `RepoCartographer` scans the codebase to create a contextual map.
-4.  **Planning Loop (Architect & Validator):** The high-level task, along with the retrieved memories, is sent to the Architect model (`gpt-4o`) to create a detailed, strategic execution plan. This plan is then reviewed by a Validator persona (using the efficient `llama3.2` model). If the plan is flawed, it's sent back to the Architect for revision. This loop ensures only a high-quality plan proceeds.
+2.  **Mapping:** The `RepoCartographer` scans the codebase to create a contextual map.
+3.  **Planning Loop (Architect & Validator):** The high-level task is sent to the Architect model (`gpt-4o`) to create a detailed, strategic execution plan. This plan is then reviewed by a Validator persona (using the efficient `llama3.2` model). If the plan is flawed or illogical, it's sent back to the Architect for revision. This loop ensures only a high-quality plan proceeds.
 4.  **Test-Driven Development:** Once the plan is approved, it is sent to the Coder model to generate a failing test (`repro_test.py`) that validates the final objective.
 5.  **Reflexion Loop (Code & Fix):**
     *   The Coder writes an initial solution.
