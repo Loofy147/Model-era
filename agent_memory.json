@@ -1,0 +1,14 @@
+[
+  {
+    "timestamp": "2025-12-03T20:46:51.678790",
+    "task": "Add a new function 'add' to the 'calculator.py' file. The function should take two arguments, 'a' and 'b', and return their sum.",
+    "success": false,
+    "solution": ""
+  },
+  {
+    "timestamp": "2025-12-03T20:46:55.815307",
+    "task": "The 'subtract' function in 'calculator.py' has a bug. It is adding the numbers instead of subtracting them. Fix the bug.",
+    "success": false,
+    "solution": ""
+  }
+]

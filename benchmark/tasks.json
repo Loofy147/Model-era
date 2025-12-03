@@ -1,0 +1,14 @@
+[
+    {
+        "id": "add_function",
+        "instruction": "Add a new function 'add' to the 'calculator.py' file. The function should take two arguments, 'a' and 'b', and return their sum.",
+        "target_file": "benchmark/tasks/calculator.py",
+        "validation_test": "benchmark/tasks/test_add_function.py"
+    },
+    {
+        "id": "fix_bug",
+        "instruction": "The 'subtract' function in 'calculator.py' has a bug. It is adding the numbers instead of subtracting them. Fix the bug.",
+        "target_file": "benchmark/tasks/calculator.py",
+        "validation_test": "benchmark/tasks/test_fix_bug.py"
+    }
+]
