@@ -3,76 +3,131 @@ import unittest
 import os
 import shutil
 import json
-from repo_map import map_repo, get_ignore_patterns
+from pathlib import Path
+from repo_map import RepoCartographer
 
-class TestRepoMap(unittest.TestCase):
+class TestRepoCartographer(unittest.TestCase):
 
     def setUp(self):
-        """Set up a temporary test directory structure."""
-        self.test_dir = 'test_repo'
-        os.makedirs(self.test_dir, exist_ok=True)
+        """Set up a temporary test directory structure for the cartographer."""
+        self.test_dir = Path('test_project')
+        self.test_dir.mkdir(exist_ok=True)
 
-        # Create dummy files and directories
-        os.makedirs(os.path.join(self.test_dir, 'src'))
-        with open(os.path.join(self.test_dir, 'src', 'main.py'), 'w') as f:
-            f.write('print("hello")')
+        # --- Create a structure with code and items to be ignored ---
 
-        os.makedirs(os.path.join(self.test_dir, '.git'))
-        with open(os.path.join(self.test_dir, '.git', 'config'), 'w') as f:
-            f.write('[core]')
+        # 1. A Python file with classes and functions
+        src_dir = self.test_dir / 'src'
+        src_dir.mkdir()
+        with open(src_dir / 'main.py', 'w') as f:
+            f.write('"""Module docstring."""\n'
+                    'class MyClass:\n'
+                    '    """A simple class."""\n'
+                    '    pass\n\n'
+                    'def my_function(arg1, arg2):\n'
+                    '    """A simple function."""\n'
+                    '    return arg1 + arg2\n')
 
-        os.makedirs(os.path.join(self.test_dir, 'data'))
-        with open(os.path.join(self.test_dir, 'data', 'data.csv'), 'w') as f:
-            f.write('a,b,c')
+        # 2. An empty Python file
+        with open(src_dir / 'empty.py', 'w') as f:
+            pass
 
-        with open(os.path.join(self.test_dir, 'README.md'), 'w') as f:
-            f.write('# Test Repo')
+        # 3. A file with a syntax error
+        with open(src_dir / 'bad_syntax.py', 'w') as f:
+            f.write('def = 1')
 
-        # Create a .gptignore file
-        with open(os.path.join(self.test_dir, '.gptignore'), 'w') as f:
-            f.write('data/\n*.csv\n')
+        # 4. A non-Python source file
+        with open(src_dir / 'script.js', 'w') as f:
+            f.write('console.log("hello");')
+
+        # 5. Ignored directories and files
+        (self.test_dir / '.git').mkdir()
+        (self.test_dir / 'node_modules').mkdir()
+        with open(self.test_dir / '.DS_Store', 'w') as f:
+            f.write('junk')
 
     def tearDown(self):
         """Remove the temporary test directory."""
         shutil.rmtree(self.test_dir)
+        if os.path.exists('repo_map.json'):
+            os.remove('repo_map.json')
 
-    def test_basic_mapping(self):
-        """Test the basic mapping of the repository."""
-        ignore_patterns = get_ignore_patterns(os.path.join(self.test_dir, '.gptignore'))
-        repo_map = map_repo(self.test_dir, ignore_patterns)
+    def test_is_ignored(self):
+        """Test the logic for ignoring files and directories."""
+        cartographer = RepoCartographer(self.test_dir)
+        self.assertTrue(cartographer.is_ignored(self.test_dir / '.git' / 'config'))
+        self.assertTrue(cartographer.is_ignored(self.test_dir / 'node_modules' / 'lib'))
+        self.assertTrue(cartographer.is_ignored(self.test_dir / '.DS_Store'))
+        self.assertFalse(cartographer.is_ignored(self.test_dir / 'src' / 'main.py'))
 
-        # Check root properties
-        self.assertEqual(repo_map['name'], 'test_repo')
-        self.assertEqual(repo_map['type'], 'directory')
+    def test_parse_python_ast(self):
+        """Test the AST parsing for classes, functions, and docstrings."""
+        cartographer = RepoCartographer(self.test_dir)
+        content = (
+            'class TestClass:\n'
+            '    """Class doc."""\n'
+            '    pass\n\n'
+            'def test_func(a, b):\n'
+            '    """Func doc."""\n'
+            '    pass\n'
+        )
+        analysis = cartographer.parse_python_ast(content)
 
-        # Get children names for easier checking
-        children_names = [child['name'] for child in repo_map['children']]
+        self.assertIn('definitions', analysis)
+        defs = analysis['definitions']
+        self.assertEqual(len(defs), 2)
 
-        # Check that ignored files are not present and others are
-        self.assertNotIn('.git', children_names)
-        self.assertNotIn('data', children_names)
-        self.assertIn('src', children_names)
-        self.assertIn('README.md', children_names)
+        # Order might vary, so check contents
+        class_def = next((d for d in defs if d['type'] == 'class'), None)
+        func_def = next((d for d in defs if d['type'] == 'function'), None)
 
-        # Check nested structure
-        src_dir = next(child for child in repo_map['children'] if child['name'] == 'src')
-        self.assertEqual(len(src_dir['children']), 1)
-        self.assertEqual(src_dir['children'][0]['name'], 'main.py')
+        self.assertIsNotNone(class_def)
+        self.assertEqual(class_def['name'], 'TestClass')
+        self.assertEqual(class_def['doc'], 'Class doc.')
 
-    def test_no_ignore_file(self):
-        """Test mapping with default ignore patterns when no ignore file is present."""
-        # Remove the gptignore file for this test
-        os.remove(os.path.join(self.test_dir, '.gptignore'))
+        self.assertIsNotNone(func_def)
+        self.assertEqual(func_def['name'], 'test_func')
+        self.assertEqual(func_def['args'], ['a', 'b'])
+        self.assertTrue(func_def['doc'].startswith('Func doc.'))
 
-        ignore_patterns = get_ignore_patterns(os.path.join(self.test_dir, '.gptignore'))
-        repo_map = map_repo(self.test_dir, ignore_patterns)
+    def test_map_repo_structure_and_analysis(self):
+        """End-to-end test of mapping the repository."""
+        cartographer = RepoCartographer(self.test_dir)
+        cartographer.map_repo()
 
-        children_names = [child['name'] for child in repo_map['children']]
+        structure = cartographer.project_structure
 
-        # Default .git should be ignored
-        self.assertNotIn('.git', children_names)
-        # Without the ignore file, 'data' should now be present
-        self.assertIn('data', children_names)
+        # Check that ignored files are excluded
+        self.assertNotIn('.DS_Store', structure)
+
+        # Check that valid source files are included
+        self.assertIn('src/main.py', structure)
+        self.assertIn('src/empty.py', structure)
+        self.assertIn('src/bad_syntax.py', structure)
+        self.assertIn('src/script.js', structure)
+
+        # Deep check the analysis of main.py
+        main_py_analysis = structure['src/main.py']['analysis']
+        self.assertIn('definitions', main_py_analysis)
+        defs = main_py_analysis['definitions']
+        self.assertEqual(len(defs), 2)
+        self.assertEqual(defs[0]['name'], 'MyClass')
+        self.assertEqual(defs[1]['name'], 'my_function')
+
+        # Check syntax error handling
+        bad_syntax_analysis = structure['src/bad_syntax.py']['analysis']
+        self.assertEqual(bad_syntax_analysis.get('error'), 'Syntax Error in parsing')
+
+    def test_export_map(self):
+        """Test the JSON export functionality."""
+        cartographer = RepoCartographer(self.test_dir)
+        cartographer.map_repo()
+        cartographer.export_map()
+
+        self.assertTrue(os.path.exists('repo_map.json'))
+        with open('repo_map.json', 'r') as f:
+            data = json.load(f)
+        self.assertEqual(len(data), 4) # 4 processed files
+        self.assertIn('src/main.py', data)
 
 if __name__ == '__main__':
     unittest.main()

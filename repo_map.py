@@ -1,72 +1,109 @@
 
 import os
-import fnmatch
-from typing import List, Dict, Any
+import ast
+import json
+from pathlib import Path
+from typing import Dict, List, Any, Optional
 
-def get_ignore_patterns(ignore_file_path: str) -> List[str]:
-    """
-    Reads patterns from a .gptignore file and returns them.
-    Includes default patterns to ignore common directories.
-    """
-    default_patterns = ['.git/', 'node_modules/', '__pycache__/', '*.pyc', '*.log']
-    if not os.path.exists(ignore_file_path):
-        return default_patterns
+# --- CONFIGURATION ---
+# Best Practice: Explicitly define what constitutes "Signal" vs "Noise"
+IGNORE_DIRS = {'.git', '__pycache__', 'node_modules', 'venv', 'env', 'build', 'dist', '.idea', '.vscode'}
+IGNORE_FILES = {'.DS_Store', 'poetry.lock', 'package-lock.json', '.gitignore'}
+TARGET_EXTENSIONS = {'.py', '.js', '.ts', '.java', '.cpp', '.h', '.rs', '.go'}
 
-    with open(ignore_file_path, 'r') as f:
-        patterns = f.read().splitlines()
+class RepoCartographer:
+    def __init__(self, root_path: str):
+        self.root_path = Path(root_path)
+        self.project_structure = {}
 
-    return default_patterns + [p for p in patterns if p and not p.startswith('#')]
-
-def is_ignored(path: str, ignore_patterns: List[str]) -> bool:
-    """
-    Checks if a given path should be ignored based on the ignore patterns.
-    """
-    for pattern in ignore_patterns:
-        if fnmatch.fnmatch(path, pattern):
+    def is_ignored(self, path: Path) -> bool:
+        """Logic: Filter out infrastructure/binary noise to focus on Logic Fidelity."""
+        for part in path.parts:
+            if part in IGNORE_DIRS or part.startswith('.'):
+                return True
+        if path.name in IGNORE_FILES:
             return True
-    return False
+        return False
 
-def map_repo(directory: str, ignore_patterns: List[str], root_dir: str = None) -> Dict[str, Any]:
-    """
-    Recursively maps a directory, ignoring specified files and folders.
-    """
-    if root_dir is None:
-        root_dir = directory
+    def parse_python_ast(self, file_content: str) -> Dict[str, Any]:
+        """
+        Deep Research Application: Using Abstract Syntax Trees (AST).
+        We don't just read the text; we extract the *intent* (Classes/Functions).
+        """
+        try:
+            tree = ast.parse(file_content)
+            definitions = []
 
-    repo_map = {'name': os.path.basename(directory), 'type': 'directory', 'children': []}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef):
+                    # Extract function name and docstring (The "Contract")
+                    docstring = ast.get_docstring(node)
+                    definitions.append({
+                        "type": "function",
+                        "name": node.name,
+                        "args": [a.arg for a in node.args.args],
+                        "doc": docstring[:100] + "..." if docstring else None
+                    })
+                elif isinstance(node, ast.ClassDef):
+                    definitions.append({
+                        "type": "class",
+                        "name": node.name,
+                        "doc": ast.get_docstring(node)
+                    })
 
-    for item in sorted(os.listdir(directory)):
-        item_path = os.path.join(directory, item)
-        relative_path = os.path.relpath(item_path, root_dir)
+            return {"definitions": definitions}
+        except SyntaxError:
+            return {"error": "Syntax Error in parsing"}
 
-        # For matching gitignore-style patterns, ensure directories
-        # are checked with a trailing slash.
-        match_path = relative_path
-        if os.path.isdir(item_path):
-            match_path += '/'
+    def map_repo(self):
+        """Walks the directory and builds the Knowledge Graph nodes."""
+        print(f"🗺️  Mapping Logic Structure for: {self.root_path}")
 
-        if is_ignored(match_path, ignore_patterns):
-            continue
+        for root, dirs, files in os.walk(self.root_path):
+            # Modify dirs in-place to skip ignored directories
+            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS and not d.startswith('.')]
 
-        if os.path.isdir(item_path):
-            repo_map['children'].append(map_repo(item_path, ignore_patterns, root_dir))
-        else:
-            repo_map['children'].append({'name': item, 'type': 'file', 'path': relative_path})
+            for file in files:
+                file_path = Path(root) / file
+                if self.is_ignored(file_path):
+                    continue
 
-    return repo_map
+                if file_path.suffix not in TARGET_EXTENSIONS:
+                    continue
 
-if __name__ == '__main__':
-    import json
-    import argparse
+                # Relative path for cleaner context
+                rel_path = str(file_path.relative_to(self.root_path))
 
-    parser = argparse.ArgumentParser(description="Create a map of a software repository.")
-    parser.add_argument('repo_path', type=str, help="The path to the repository to map.")
-    parser.add_argument('--ignore-file', type=str, default='.gptignore', help="Path to the ignore file.")
-    args = parser.parse_args()
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
 
-    ignore_file = os.path.join(args.repo_path, args.ignore_file)
-    ignore_patterns = get_ignore_patterns(ignore_file)
+                    file_info = {
+                        "size": len(content),
+                        "extension": file_path.suffix,
+                        "analysis": {}
+                    }
 
-    repo_structure = map_repo(args.repo_path, ignore_patterns)
+                    # If Python, apply AST logic. If JS/Other, we would apply TreeSitter (simplified here)
+                    if file_path.suffix == '.py':
+                        file_info["analysis"] = self.parse_python_ast(content)
 
-    print(json.dumps(repo_structure, indent=2))
+                    self.project_structure[rel_path] = file_info
+                    print(f"   ✅ Processed: {rel_path}")
+
+                except Exception as e:
+                    print(f"   ❌ Error reading {rel_path}: {e}")
+
+    def export_map(self, output_file="repo_map.json"):
+        with open(output_file, 'w') as f:
+            json.dump(self.project_structure, f, indent=2)
+        print(f"\n🚀 Logic Map exported to {output_file}")
+        print(f"📊 Total Files Analyzed: {len(self.project_structure)}")
+
+# --- EXECUTION ---
+# Replace '.' with the path to the project you want to analyze
+if __name__ == "__main__":
+    # For demonstration, we map the current directory
+    mapper = RepoCartographer('.')
+    mapper.map_repo()
+    mapper.export_map()
