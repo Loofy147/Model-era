@@ -3,6 +3,7 @@ import unittest
 import os
 import json
 import argparse
+import shutil
 from unittest.mock import patch, MagicMock
 
 # Import the classes to be tested
@@ -12,8 +13,14 @@ from main import main
 class TestFlowIntegration(unittest.TestCase):
 
     def setUp(self):
-        """Set up a dummy repo map for testing."""
+        """Set up a dummy repo map and workspace for testing."""
         self.map_file = "test_repo_map.json"
+        self.workspace_dir = "_flow_workspace"
+
+        # Clean up workspace before test
+        if os.path.exists(self.workspace_dir):
+            shutil.rmtree(self.workspace_dir)
+
         dummy_map = {
             "src/api.py": {
                 "size": 120,
@@ -29,38 +36,61 @@ class TestFlowIntegration(unittest.TestCase):
             json.dump(dummy_map, f)
 
     def tearDown(self):
-        """Clean up the dummy repo map."""
+        """Clean up dummy files and workspace."""
         if os.path.exists(self.map_file):
             os.remove(self.map_file)
         if os.path.exists('repo_map.json'):
              os.remove('repo_map.json')
+        if os.path.exists(self.workspace_dir):
+            shutil.rmtree(self.workspace_dir)
 
     def test_flow_engineer_initialization(self):
         """Test that the FlowEngineer class initializes correctly."""
         try:
             engineer = FlowEngineer(self.map_file)
             self.assertIsNotNone(engineer.repo_map)
+            self.assertTrue(os.path.exists(self.workspace_dir))
         except Exception as e:
             self.fail(f"FlowEngineer initialization failed with {e}")
 
+    @patch('flow_engineer.FlowEngineer.run_tests')
     @patch('flow_engineer.FlowEngineer.call_llm')
-    def test_flow_execution_steps(self, mock_call_llm):
-        """Test that the execute_flow method calls all three steps in order."""
-        mock_call_llm.return_value = "MOCKED_YAML_PLAN"
+    def test_react_flow_handles_retry_and_succeeds(self, mock_call_llm, mock_run_tests):
+        """Test the full ReAct loop with one failure and subsequent success."""
+        # --- Mock AI Responses ---
+        mock_plan = "plan:\\n  - file: 'solution.py'\\n    action: 'create'"
+        mock_test_code = "import unittest\\nfrom solution import solve\\n\\nclass TestSolve(unittest.TestCase):\\n    def test_solve(self):\\n        self.assertEqual(solve(), 42)"
+        failing_solution = "def solve():\\n    return 0"
+        passing_solution = "def solve():\\n    return 42"
 
+        mock_call_llm.side_effect = [
+            mock_plan,
+            mock_test_code,
+            failing_solution,
+            passing_solution
+        ]
+
+        # --- Mock Test Execution ---
+        mock_run_tests.side_effect = [
+            {"success": False, "stderr": "AssertionError: 0 != 42"},
+            {"success": True, "stdout": "OK"}
+        ]
+
+        # --- Execute ---
         engineer = FlowEngineer(self.map_file)
-        engineer.execute_flow("Test task")
+        engineer.execute_flow("Implement the solve function")
 
-        self.assertEqual(mock_call_llm.call_count, 3)
+        # --- Assert ---
+        self.assertEqual(mock_call_llm.call_count, 4, "LLM should be called for plan, test, initial solve, and retry solve")
+        self.assertEqual(mock_run_tests.call_count, 2, "Tests should be run twice (initial fail, retry success)")
 
-        first_call_args = mock_call_llm.call_args_list[0].args
-        self.assertIn("You are a Senior Software Architect", first_call_args[0])
+        final_solution_path = os.path.join(self.workspace_dir, "solution.py")
+        self.assertTrue(os.path.exists(final_solution_path))
+        with open(final_solution_path, 'r') as f:
+            content = f.read()
 
-        second_call_args = mock_call_llm.call_args_list[1].args
-        self.assertIn("You are a QA Engineer", second_call_args[0])
-
-        third_call_args = mock_call_llm.call_args_list[2].args
-        self.assertIn("You are a Senior Developer", third_call_args[0])
+        cleaned_passing_solution = engineer._clean(passing_solution)
+        self.assertEqual(content, cleaned_passing_solution)
 
     @patch('main.RepoCartographer')
     @patch('main.FlowEngineer')
