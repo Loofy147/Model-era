@@ -2,25 +2,29 @@
 import json
 import subprocess
 from typing import Dict, List, Optional
+from ai_client import AIClient
+from pathlib import Path
 
 # --- CONFIGURATION ---
 REPO_MAP_PATH = "repo_map.json"
 MAX_RETRIES = 3
+WORKSPACE_DIR = "_flow_workspace"
 
 class FlowEngineer:
     def __init__(self, repo_map_path: str):
         with open(repo_map_path, 'r') as f:
             self.repo_map = json.load(f)
         self.context_memory = []
+        self.ai = AIClient()
+        self.workspace = Path(WORKSPACE_DIR)
+        self.workspace.mkdir(exist_ok=True)
 
     def call_llm(self, system_prompt: str, user_prompt: str) -> str:
         """
-        PLACEHOLDER: Connect this to your LLM (GPT-4o / Claude 3.5 Sonnet).
-        For this 'Deep Research' implementation, we focus on the PROMPTS.
+        Connects to the AI model to generate a response.
         """
-        # Example: return client.chat.completions.create(...)
         print(f"\n🧠 [AI THINKING] System: {system_prompt[:50]}... | User: {user_prompt[:50]}...")
-        return "MOCKED_RESPONSE"
+        return self.ai.generate(system_prompt, user_prompt)
 
     def step_1_planner(self, user_req: str) -> str:
         """
@@ -71,10 +75,6 @@ class FlowEngineer:
 
         print("--- 2. GENERATING TEST HARNESS ---")
         test_code = self.call_llm(system_prompt, user_prompt)
-
-        # In a real run, we would save this file:
-        # with open("reproduction_script.py", "w") as f: f.write(test_code)
-
         return test_code
 
     def step_3_solver(self, plan: str, test_code: str) -> str:
@@ -97,28 +97,82 @@ class FlowEngineer:
         solution = self.call_llm(system_prompt, user_prompt)
         return solution
 
+    def write_to_workspace(self, filename: str, content: str):
+        path = self.workspace / filename
+        with open(path, "w") as f:
+            f.write(content)
+        return path
+
+    def run_tests(self, test_file: str) -> Dict:
+        print(f"   ⚙️ Executing {test_file}...")
+        try:
+            result = subprocess.run(
+                ["python", test_file],
+                cwd=self.workspace,
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            return {
+                "success": result.returncode == 0,
+                "stdout": result.stdout,
+                "stderr": result.stderr
+            }
+        except subprocess.TimeoutExpired:
+            return {"success": False, "stderr": "Error: Test timed out."}
+        except Exception as e:
+            return {"success": False, "stderr": f"System Error: {str(e)}"}
+
+    def _clean(self, text):
+        return text.replace("```python", "").replace("```", "").strip()
+
     def execute_flow(self, user_request: str):
-        # 1. Plan
+        print(f"🚀 STARTING FLOW: '{user_request}'")
+
         plan = self.step_1_planner(user_request)
-        print(f"📋 Plan Generated:\n{plan}\n")
+        print(f"📋 Initial Plan Generated:\n{plan}\n")
 
-        # 2. Test
         test_code = self.step_2_test_generator(plan)
-        print(f"🧪 Test Code Generated (Simulation):\n{test_code[:100]}...\n")
+        self.write_to_workspace("test_suite.py", self._clean(test_code))
 
-        # 3. Solve & Loop
-        # In a full agent, we would run the test here.
-        # process = subprocess.run(["python", "reproduction_script.py"], capture_output=True)
-        # If process.returncode != 0:
-        #    feed error back to LLM.
+        solution_code = self.step_3_solver(plan, test_code)
+        self.write_to_workspace("solution.py", self._clean(solution_code))
 
-        solution = self.step_3_solver(plan, test_code)
-        print(f"✅ Solution Generated:\n{solution[:100]}...")
+        attempt = 0
+        while attempt < MAX_RETRIES:
+            print(f"\n🔄 Attempt {attempt + 1}/{MAX_RETRIES}: Running Verification...")
+
+            result = self.run_tests("test_suite.py")
+
+            if result["success"]:
+                print("   ✅ SUCCESS! Tests Passed.")
+                print(f"   🎉 Final verified code is in {self.workspace}/solution.py")
+                return
+
+            print("   ❌ FAILED. Analyzing traceback...")
+            error_msg = result["stderr"] if result["stderr"] else result["stdout"]
+            print(f"   📝 Error Snippet: {error_msg[:200]}...")
+
+            with open(self.workspace / 'solution.py', 'r') as f:
+                current_code = f.read()
+
+            reflection_prompt_user = f"The previous code attempt failed.\nOriginal Task: {user_request}\nOriginal Plan: {plan}\nTest Script that Failed:\n{test_code}\n\nCurrent (Failing) Code:\n{current_code}\n\nError Message:\n{error_msg}\n\nPlease analyze the error and the code, then rewrite the FULL 'solution.py' to fix the error."
+            reflection_prompt_system = "You are a Senior Debugger. Your task is to fix failing code based on test results. Provide only the complete, corrected Python code for the file."
+
+            new_code = self.call_llm(reflection_prompt_system, reflection_prompt_user)
+            self.write_to_workspace("solution.py", self._clean(new_code))
+            attempt += 1
+
+        print("\n💀 MAX RETRIES REACHED. The agent could not solve the problem.")
 
 # --- EXECUTION ---
 if __name__ == "__main__":
     # Point this to your repo_map.json generated in Phase 1
-    engine = FlowEngineer("repo_map.json")
+    if not Path(REPO_MAP_PATH).exists():
+        print(f"Error: Repository map file '{REPO_MAP_PATH}' not found. Please run the repo cartographer first.")
+        exit(1)
+
+    engine = FlowEngineer(REPO_MAP_PATH)
 
     # Example Task
     task = "Add a rate_limiter to the API class that allows 5 requests per minute."
