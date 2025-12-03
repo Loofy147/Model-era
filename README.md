@@ -4,20 +4,13 @@ This repository contains the implementation of a sophisticated autonomous agent 
 
 ## System Architecture
 
-The system is designed as a **multi-agent collaboration framework**, orchestrated by a `TeamManager`. Each agent is a specialized persona responsible for a specific phase of the software development lifecycle. They collaborate by reading from and writing to a `SharedContext` object, which acts as a central scratchpad for the task.
+The agent's intelligence is distributed across a "model roster" that balances performance and cost:
 
-### The Agent Team
+*   **The Brain (Architect):** `gpt-4o` (or `claude-3-5-sonnet`) handles high-level planning, strategic thinking, and final security audits.
+*   **The Hands (Coder):** `ollama/qwen2.5-coder` (or a fallback like `gpt-4o-mini`) is the specialist responsible for writing and debugging code.
+*   **The Eyes (Clerk):** `ollama/llama3.2` is a fast, efficient model used for summarization, repository mapping, and other text-processing tasks.
 
-*   **Architect:** (Model: `gpt-4o`) The strategic leader. It analyzes the user's request, codebase map, and past experiences to create a detailed, multi-step YAML plan.
-*   **Validator:** (Model: `ollama/llama3.2`) The gatekeeper. It reviews the Architect's plan for logical flaws or vagueness. If the plan is weak, it provides a critique and sends it back for revision.
-*   **QA Engineer:** (Model: `ollama/qwen2.5-coder`) The test writer. Following the approved plan, it writes a Python test script that will fail until the required changes are correctly implemented.
-*   **Coder:** (Model: `ollama/qwen2.5-coder`) The implementer. It writes the source code to satisfy the test harness and fulfill the plan's requirements.
-*   **Debugger:** (Model: `ollama/qwen2.5-coder`) The problem solver. If the Coder's solution fails the test, the Debugger is activated. It analyzes the error and attempts to rewrite the code to fix the issue.
-*   **Auditor:** (Model: `gpt-4o`) The final reviewer. Once the code passes all tests, the Auditor performs a final check for security vulnerabilities, style issues, and adherence to the original plan.
-
-### The Orchestrator: `TeamManager`
-
-The `TeamManager` coordinates the entire workflow. It initializes the `SharedContext` and manages a state machine that determines which agent's turn it is to act. It passes the context to each agent and transitions the state based on the outcome of their work, orchestrating the seamless collaboration of the entire team.
+This hybrid approach allows the system to use the most powerful models for critical thinking while offloading the bulk of the work to cheaper, specialized, or locally-run models, resulting in significant cost savings.
 
 ## Prerequisites
 
@@ -71,14 +64,13 @@ python main_hybrid.py src/database.py "Add a connection pool with a retry mechan
 When you run the command, the agent executes the following "Deep Logic Flow":
 
 1.  **Safety First:** A new Git branch is created to sandbox the operation, ensuring your main branch remains clean.
-2.  **Memory Retrieval:** The agent searches its long-term memory (`agent_memory.json`) for experiences from similar, past tasks. These experiences (both successes and failures) are used to provide context to the AI models, helping them avoid past mistakes and reuse successful strategies.
-3.  **Mapping:** The `RepoCartographer` scans the codebase to create a contextual map.
-4.  **Planning Loop (Architect & Validator):** The high-level task, along with the retrieved memories, is sent to the Architect model (`gpt-4o`) to create a detailed, strategic execution plan. This plan is then reviewed by a Validator persona (using the efficient `llama3.2` model). If the plan is flawed, it's sent back to the Architect for revision. This loop ensures only a high-quality plan proceeds.
-5.  **Test-Driven Development:** Once the plan is approved, it is sent to the Coder model to generate a failing test (`repro_test.py`) that validates the final objective.
-6.  **Reflexion Loop (Code & Fix):**
+2.  **Mapping:** The `RepoCartographer` scans the codebase to create a contextual map.
+3.  **Planning Loop (Architect & Validator):** The high-level task is sent to the Architect model (`gpt-4o`) to create a detailed, strategic execution plan. This plan is then reviewed by a Validator persona (using the efficient `llama3.2` model). If the plan is flawed or illogical, it's sent back to the Architect for revision. This loop ensures only a high-quality plan proceeds.
+4.  **Test-Driven Development:** Once the plan is approved, it is sent to the Coder model to generate a failing test (`repro_test.py`) that validates the final objective.
+5.  **Reflexion Loop (Code & Fix):**
     *   The Coder writes an initial solution.
     *   The test is executed.
     *   If the test fails, the error is fed back to the Coder, which attempts to fix its own code. This loop continues until the test passes or a maximum number of retries is reached.
-7.  **Security Audit:** Once the code passes the test, it is sent back to the Architect for a final security and style review.
-8.  **Transplant & Commit:** If the audit is clean, the final, verified code from the `solution.py` in the workspace is copied to the target file (`src/database.py`), and the changes are committed to the new branch.
-9.  **Cleanup:** If the process fails at any point, the sandbox branch is deleted, leaving your repository untouched.
+6.  **Security Audit:** Once the code passes the test, it is sent back to the Architect for a final security and style review.
+7.  **Transplant & Commit:** If the audit is clean, the final, verified code from the `solution.py` in the workspace is copied to the target file (`src/database.py`), and the changes are committed to the new branch.
+8.  **Cleanup:** If the process fails at any point, the sandbox branch is deleted, leaving your repository untouched.

@@ -5,86 +5,97 @@ import json
 import shutil
 from unittest.mock import patch, MagicMock
 
-from main_hybrid import TeamManager, GitGatekeeper, AGENT_PERSONAS
+# Since the classes are in the same file, we need to import them carefully
+from main_hybrid import FlowEngineer, GitGatekeeper, RepoCartographer
 
-class TestTeamManager(unittest.TestCase):
+class TestHybridAgent(unittest.TestCase):
 
     def setUp(self):
+        """Set up a clean workspace and dummy files for each test."""
         self.workspace_dir = "_agent_workspace"
         self.map_file = "repo_map.json"
-        self.memory_file = "agent_memory.json"
         self.target_file = "src/test_file.py"
-        self.task = "Implement a new feature"
 
-        # Clean up and set up dummy files
-        if os.path.exists(self.workspace_dir):
-            shutil.rmtree(self.workspace_dir)
-        os.makedirs(self.workspace_dir, exist_ok=True)
-        if os.path.exists(self.memory_file):
-            os.remove(self.memory_file)
+        # Create dummy directories and files for a realistic test
         os.makedirs(os.path.dirname(self.target_file), exist_ok=True)
         with open(self.target_file, "w") as f:
-            f.write("def old_function(): pass")
-        with open(self.map_file, "w") as f:
-            json.dump({self.target_file: ["old_function"]}, f)
+            f.write("def old_function():\\n    return 0")
+
+        # Clean up workspace from previous runs
+        if os.path.exists(self.workspace_dir):
+            shutil.rmtree(self.workspace_dir)
+
+        # Create a dummy repo map
+        dummy_map = {self.target_file: ["Function: old_function"]}
+        with open(self.map_file, 'w') as f:
+            json.dump(dummy_map, f)
 
     def tearDown(self):
+        """Clean up all created files and directories."""
         if os.path.exists(self.workspace_dir):
             shutil.rmtree(self.workspace_dir)
         if os.path.exists(self.map_file):
             os.remove(self.map_file)
-        if os.path.exists(self.memory_file):
-            os.remove(self.memory_file)
         if os.path.exists(os.path.dirname(self.target_file)):
             shutil.rmtree(os.path.dirname(self.target_file))
 
+    @patch('main_hybrid.GitGatekeeper')
     @patch('main_hybrid.HybridAIClient')
-    @patch('main_hybrid.subprocess.run')
-    def test_team_manager_full_workflow(self, mock_subprocess_run, MockAIClient):
+    def test_planning_and_reflexion_loop(self, MockAIClient, MockGitGatekeeper):
+        """
+        Tests the entire agentic loop, including a plan rejection and a code retry.
+        - Mocks the AI to simulate a flawed plan, a correction, a code failure, and a success.
+        - Verifies that the agent correctly cycles through both planning and coding loops.
+        """
         # --- Mock AI Responses ---
         ai_instance = MockAIClient.return_value
+
+        # Phase 1: Planning
+        flawed_plan = "plan: vague plan"
+        validator_critique = "Critique: The plan is too vague. Please provide details."
+        approved_plan = "plan: detailed and correct plan"
+
+        # Phase 2: Coding
+        mock_test = "import unittest\\nfrom solution import new_function\\n\\nclass MyTest(unittest.TestCase):\\n    def test_logic(self):\\n        self.assertEqual(42, new_function())"
+        failing_code = "def new_function():\\n    return 99"
+        passing_code = "def new_function():\\n    return 42"
+        mock_critique = "LGTM"
+
         ai_instance.generate.side_effect = [
-            # Planning Phase
-            "plan: ...",  # Architect
-            "APPROVED",    # Validator
-            # Coding Phase
-            "import unittest; ...",  # QA Engineer
-            "def new_feature(): return 42",  # Coder
-            # Auditor Phase
-            "LGTM"  # Auditor
+            # Planning Loop
+            flawed_plan,         # Architect (Attempt 1)
+            validator_critique,  # Validator -> Rejects
+            approved_plan,       # Architect (Attempt 2)
+            "APPROVED",          # Validator -> Approves
+            # Coding Loop
+            mock_test,           # QA Engineer
+            failing_code,        # Python Dev (Attempt 1)
+            passing_code,        # Python Dev (Attempt 2)
+            mock_critique        # Auditor
         ]
 
-        # --- Mock Test Execution ---
-        mock_subprocess_run.return_value = MagicMock(returncode=0, stdout="OK", stderr="")
+        # --- Mock subprocess for test execution ---
+        mock_failed_process = MagicMock(returncode=1, stderr="AssertionError: 99 != 42", stdout="")
+        mock_success_process = MagicMock(returncode=0, stderr="", stdout="OK")
 
-        # --- Execute ---
-        manager = TeamManager(self.task, self.target_file)
+        with patch('subprocess.run', side_effect=[mock_failed_process, mock_success_process]) as mock_run:
+            # --- Execute ---
+            engineer = FlowEngineer()
+            success = engineer.execute("a test task", self.target_file)
 
-        # Manually step through the workflow to test orchestration logic
-        # This gives us more granular control than calling execute_workflow() directly
+            # --- Assertions ---
+            self.assertTrue(success)
+            # Architect (2), Validator (2), QA (1), Dev (2), Auditor (1) = 8 calls
+            self.assertEqual(ai_instance.generate.call_count, 8)
+            self.assertEqual(mock_run.call_count, 2)
 
-        # 1. Plan
-        manager._planning_phase()
-        self.assertEqual(manager.context.current_state, "GENERATE_TESTS")
-        self.assertIsNotNone(manager.context.plan)
+            # Check that the final approved plan was written
+            with open(os.path.join(self.workspace_dir, "plan.yaml"), 'r') as f:
+                self.assertEqual(f.read().strip(), approved_plan)
 
-        # 2. Generate Tests
-        manager._test_generation_phase()
-        self.assertEqual(manager.context.current_state, "CODING")
-        self.assertIsNotNone(manager.context.test_code)
-
-        # 3. Coding & Reflexion
-        manager._coding_phase()
-        self.assertEqual(manager.context.current_state, "AUDIT")
-        self.assertIsNotNone(manager.context.solution_code)
-
-        # 4. Audit
-        manager._audit_phase()
-        self.assertEqual(manager.context.current_state, "DONE")
-
-        # Final check
-        self.assertTrue(manager.execute_workflow())
-        self.assertEqual(ai_instance.generate.call_count, 5)
+            # Check that the final solution was correctly written
+            with open(os.path.join(self.workspace_dir, "solution.py"), 'r') as f:
+                self.assertEqual(f.read().strip(), passing_code)
 
 if __name__ == '__main__':
     unittest.main()
