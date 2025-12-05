@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List
+from logger import get_logger
 
 # --- LIBRARY: LiteLLM (The Gateway) ---
 try:
@@ -25,9 +26,52 @@ WORKSPACE_DIR = "_agent_workspace"
 REPO_MAP_FILE = "repo_map.json"
 MAX_RETRIES = 3
 
+class AgentError(Exception):
+    """Custom exception for agent-related errors."""
+    def __init__(self, agent: str, phase: str, details: dict):
+        self.agent = agent
+        self.phase = phase
+        self.details = details
+        super().__init__(f"AgentError: {agent} failed in {phase} with details: {json.dumps(details)}")
+
+# Initialize a global logger
+logger = get_logger(__name__)
+
+class Metrics:
+    """A simple class to collect and store metrics."""
+    def __init__(self):
+        self.data = []
+
+    def record(self, metric: dict):
+        self.data.append(metric)
+
+    def get_all(self):
+        return self.data
+
 # MODEL ROSTER (Adjust based on your availability)
 # Tier 1: High Intelligence, High Cost
 MODEL_ARCHITECT = "gpt-4o"
+from contextlib import contextmanager
+import time
+
+@contextmanager
+def track_agent_execution(agent_name: str, phase: str, metrics: Metrics):
+    """
+    A context manager to track the execution time and token usage of an agent.
+    """
+    start_time = time.time()
+    # In a real implementation, you would get the token usage from the AI client
+    tokens_used = 0
+    try:
+        yield
+    finally:
+        duration_ms = (time.time() - start_time) * 1000
+        metrics.record({
+            "agent": agent_name,
+            "phase": phase,
+            "duration_ms": duration_ms,
+            "tokens_used": tokens_used
+        })
 # Tier 2: High Skill, Zero/Low Cost (Local or Cheap API)
 # Use "ollama/qwen2.5-coder:14b" if running locally, or "gpt-4o-mini" / "groq/..."
 MODEL_CODER = "ollama/qwen2.5-coder:14b"
@@ -36,6 +80,42 @@ MODEL_CLERK = "ollama/llama3.2"
 
 # Fallback: If local models fail, use this cheap cloud model
 MODEL_FALLBACK = "gpt-4o-mini"
+
+class SecurityError(Exception):
+    """Custom exception for security violations."""
+    pass
+
+class InputValidator:
+    """
+    Validates and sanitizes user input to prevent security risks like prompt injection.
+    """
+    MAX_INSTRUCTION_LENGTH = 2000
+    PROMPT_INJECTION_PATTERNS = [
+        "ignore previous", "ignore all", "system:", "disregard",
+        "act as", "you are a", "roleplay as"
+    ]
+
+    @staticmethod
+    def validate_instruction(text: str) -> str:
+        """
+        Validates the user's instruction.
+
+        Raises:
+            ValueError: If the instruction is too long.
+            SecurityError: If a potential prompt injection is detected.
+
+        Returns:
+            The original text if it's valid.
+        """
+        if len(text) > InputValidator.MAX_INSTRUCTION_LENGTH:
+            raise ValueError(f"Instruction exceeds maximum length of {InputValidator.MAX_INSTRUCTION_LENGTH} characters.")
+
+        lower_text = text.lower()
+        for pattern in InputValidator.PROMPT_INJECTION_PATTERNS:
+            if pattern in lower_text:
+                raise SecurityError(f"Potential prompt injection detected: found '{pattern}'.")
+
+        return text
 
 # --- 1. HYBRID AI CLIENT (The Orchestrator) ---
 class HybridAIClient:
@@ -77,7 +157,7 @@ class HybridAIClient:
             model = MODEL_CLERK
             temp = 0.0
 
-        print(f"   🧠 [Hybrid] Routing '{role}' -> {model}...")
+        logger.info(f"Routing '{role}' to {model}", details={"role": role, "model": model, "temperature": temp})
 
         try:
             response = completion(
@@ -91,17 +171,19 @@ class HybridAIClient:
             )
             return response.choices[0].message.content
         except Exception as e:
-            print(f"   ⚠️  Error with {model}: {e}")
+            logger.error(f"Error with {model}: {e}", extra={'details': {"model": model, "error": str(e)}})
             if model != MODEL_FALLBACK:
-                print(f"   🔄 Retrying with Fallback ({MODEL_FALLBACK})...")
+                logger.info(f"Retrying with Fallback ({MODEL_FALLBACK})...")
                 try:
-                    return completion(
+                    response = completion(
                         model=MODEL_FALLBACK,
                         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
-                    ).choices[0].message.content
+                    )
+                    return response.choices[0].message.content
                 except Exception as e2:
-                    return f"Error: {e2}"
-            return f"Error: {e}"
+                    logger.error(f"Fallback model failed: {e2}", extra={'details': {"model": MODEL_FALLBACK, "error": str(e2)}})
+                    raise AgentError(role, "generation", {"original_error": str(e), "fallback_error": str(e2)})
+            raise AgentError(role, "generation", {"error": str(e)})
 
 # --- 2. REPO CARTOGRAPHER (The Map) ---
 class RepoCartographer:
@@ -157,7 +239,7 @@ class GitGatekeeper:
             self.run(["stash", "save", "Agent-Safety-Stash"])
 
         self.run(["checkout", "-b", branch])
-        print(f"🌿 Created branch: {branch}")
+        logger.info(f"🌿 Created branch: {branch}")
         return branch
 
     def commit(self, message):
@@ -186,7 +268,7 @@ class MemoryManager:
         self.memories.append(experience)
         with open(self.memory_file, 'w') as f:
             json.dump(self.memories, f, indent=2)
-        print("   📝 Experience saved to memory.")
+        logger.info("Experience saved to memory.", extra={'details': {"task": task, "success": success}})
 
     def find_similar_experiences(self, task: str, top_k=2):
         # Simple keyword-based similarity for now.
@@ -263,29 +345,32 @@ Otherwise, provide a brief, constructive critique.
 
 class Agent:
     """A generic agent that can perform a single turn."""
-    def __init__(self, persona: Dict[str, str], ai_client: HybridAIClient):
+    def __init__(self, persona: Dict[str, str], ai_client: HybridAIClient, metrics: Metrics):
         self.persona = persona
         self.ai = ai_client
+        self.metrics = metrics
 
     def execute_turn(self, context: SharedContext, user_prompt: str) -> str:
         """Generates a response based on the agent's persona and the shared context."""
-        return self.ai.generate(
-            role=self.persona["role"],
-            system_prompt=self.persona["system_prompt"],
-            user_prompt=user_prompt
-        )
+        with track_agent_execution(self.persona['role'], context.current_state, self.metrics):
+            return self.ai.generate(
+                role=self.persona["role"],
+                system_prompt=self.persona["system_prompt"],
+                user_prompt=user_prompt
+            )
 
 class TeamManager:
     def __init__(self, task, target_file):
         self.ai = HybridAIClient()
         self.memory = MemoryManager()
         self.workspace = Path(WORKSPACE_DIR)
+        self.metrics = Metrics()
 
         repo_map = self._load_map()
         similar_experiences = self.memory.find_similar_experiences(task)
         self.context = SharedContext(task, target_file, repo_map, similar_experiences)
 
-        self.agents = {name: Agent(persona, self.ai) for name, persona in AGENT_PERSONAS.items()}
+        self.agents = {name: Agent(persona, self.ai, self.metrics) for name, persona in AGENT_PERSONAS.items()}
 
     def _load_map(self):
         repo_map_path = Path(REPO_MAP_FILE)
@@ -295,10 +380,10 @@ class TeamManager:
             return json.load(f)
 
     def execute_workflow(self):
-        print(f"\n🚀 STARTING Agent Team for: {self.context.task}")
+        logger.info(f"Starting agent team for: {self.context.task}", extra={'details': {"task": self.context.task}})
 
         while self.context.current_state not in ["DONE", "FAILED"]:
-            print(f"\n--- Current State: {self.context.current_state} ---")
+            logger.info(f"Current state: {self.context.current_state}", extra={'details': {"state": self.context.current_state}})
 
             if self.context.current_state == "PLANNING":
                 self._planning_phase()
@@ -312,12 +397,15 @@ class TeamManager:
                 self._audit_phase()
 
         if self.context.current_state == "DONE":
-            print("✅ Workflow Complete.")
+            logger.info("Workflow complete.", extra={'details': {"task": self.context.task}})
             self.memory.save_experience(self.context.task, True, self.context.solution_code)
             return True
         else:
-            print("❌ Workflow Failed.")
+            logger.error("Workflow failed.", extra={'details': {"task": self.context.task}})
             self.memory.save_experience(self.context.task, False, self.context.solution_code)
+
+            # Print metrics at the end of the workflow
+            logger.info("Execution Metrics:", extra={'details': {"metrics": self.metrics.get_all()}})
             return False
 
     def _planning_phase(self):
@@ -331,22 +419,22 @@ class TeamManager:
             validation = self.agents["VALIDATOR"].execute_turn(self.context, validation_prompt)
 
             if "APPROVED" in validation.upper():
-                print(f"   ✅ Plan Approved on attempt {i+1}.")
+                logger.info(f"Plan approved on attempt {i+1}.", extra={'details': {"attempt": i+1}})
                 self.context.plan = plan
                 self.context.current_state = "GENERATE_TESTS"
                 return
             else:
                 self.context.critique = validation
-                print(f"   🟠 Plan Rejected. Critique: {self.context.critique}")
+                logger.warning("Plan rejected.", extra={'details': {"critique": self.context.critique}})
 
-        print("   💀 Max retries reached for planning.")
+        logger.error("Max retries reached for planning.", extra={'details': {"max_retries": MAX_RETRIES}})
         self.context.current_state = "FAILED"
 
     def _test_generation_phase(self):
         test_prompt = f"Plan: {self.context.plan}\nWrite a Python script 'repro_test.py' that reproduces the issue or validates the new feature. It MUST fail initially."
         self.context.test_code = self.agents["QA_ENGINEER"].execute_turn(self.context, test_prompt)
         self._write_to_workspace("repro_test.py", self.context.test_code)
-        print("   ✅ Test Harness Created.")
+        logger.info("Test harness created.")
         self.context.current_state = "CODING"
 
     def _coding_phase(self):
@@ -366,25 +454,25 @@ class TeamManager:
 
             res = subprocess.run(["python", "repro_test.py"], cwd=self.workspace, capture_output=True, text=True, timeout=10)
             if res.returncode == 0:
-                print(f"   🎉 SUCCESS! Tests Passed on attempt {i+1}.")
+                logger.info(f"Tests passed on attempt {i+1}.", extra={'details': {"attempt": i+1}})
                 self.context.current_state = "REFACTORING"
                 return
             else:
-                print(f"   ❌ Test Failed. Retrying...")
+                logger.warning("Test failed. Retrying...", extra={'details': {"attempt": i+1, "error": res.stderr + res.stdout}})
                 self.context.error_log = res.stderr + res.stdout
 
-        print("   💀 Max retries reached for coding.")
+        logger.error("Max retries reached for coding.", extra={'details': {"max_retries": MAX_RETRIES}})
         self.context.current_state = "FAILED"
 
     def _refactoring_phase(self):
         for i in range(MAX_RETRIES):
             lint_results = self._run_linter(self.workspace / "solution.py")
             if not lint_results:
-                print("   ✅ Linter passed.")
+                logger.info("Linter passed.")
                 self.context.current_state = "AUDIT"
                 return
 
-            print(f"   🟠 Linter found issues:\n{lint_results}")
+            logger.warning("Linter found issues.", extra={'details': {"lint_results": lint_results}})
 
             refactor_prompt = f"The following code has linting errors:\n\n```python\n{self.context.solution_code}\n```\n\nLinter Output:\n{lint_results}\n\nPlease rewrite the full code to fix these issues."
 
@@ -395,19 +483,19 @@ class TeamManager:
             # Re-run tests to ensure refactoring didn't break anything
             res = subprocess.run(["python", "repro_test.py"], cwd=self.workspace, capture_output=True, text=True, timeout=10)
             if res.returncode != 0:
-                print("   ❌ Refactoring broke the tests. Failing workflow.")
+                logger.error("Refactoring broke the tests. Failing workflow.", extra={'details': {"error": res.stderr + res.stdout}})
                 self.context.current_state = "FAILED"
                 return
 
-            print("   ✅ Refactoring successful and tests still pass.")
+            logger.info("Refactoring successful and tests still pass.")
 
-        print("   💀 Max retries reached for refactoring.")
+        logger.warning("Max retries reached for refactoring. Proceeding to audit.", extra={'details': {"max_retries": MAX_RETRIES}})
         self.context.current_state = "AUDIT" # Proceed to audit even if linting fails
 
     def _audit_phase(self):
         audit_prompt = f"Code:\n{self.context.solution_code}"
         self.context.critique = self.agents["AUDITOR"].execute_turn(self.context, audit_prompt)
-        print(f"   🔍 Auditor's Review: {self.context.critique}")
+        logger.info(f"Auditor's Review: {self.context.critique}", extra={'details': {"critique": self.context.critique}})
         self.context.current_state = "DONE"
 
     def _write_to_workspace(self, filename, content):
@@ -442,11 +530,14 @@ def main():
     current_branch = git.run(["rev-parse", "--abbrev-ref", "HEAD"])
 
     try:
+        # Validate user input before proceeding
+        validated_instruction = InputValidator.validate_instruction(args.instruction)
+
         # Create Sandbox Branch
-        branch = git.create_branch(args.instruction)
+        branch = git.create_branch(validated_instruction)
 
         # Run Logic
-        manager = TeamManager(args.instruction, args.file)
+        manager = TeamManager(validated_instruction, args.file)
         success = manager.execute_workflow()
 
         if success:
@@ -454,17 +545,21 @@ def main():
             src = manager.workspace / "solution.py"
             dst = Path(args.file)
             shutil.copy(src, dst)
-            print(f"   🚚 Transplanted solution to {dst}")
+            logger.info(f"Transplanted solution to {dst}", details={"source": str(src), "destination": str(dst)})
 
-            git.commit(args.instruction)
-            print(f"\n✨ DONE. Review changes: git diff {current_branch}..{branch}")
+            git.commit(validated_instruction)
+            logger.info(f"Committed changes to branch {branch}", extra={'details': {"branch": branch}})
         else:
-            print("\n❌ Task Failed. Reverting branch.")
+            logger.error("Task failed. Reverting branch.", extra={'details': {"branch": branch}})
             git.run(["checkout", current_branch])
             git.run(["branch", "-D", branch])
 
+    except (ValueError, SecurityError) as e:
+        logger.error(f"Input validation failed: {e}", extra={'details': {"error": str(e)}})
+    except AgentError as e:
+        logger.error(f"Agent failed: {e}", extra={'details': {"agent": e.agent, "phase": e.phase, "details": e.details}})
     except KeyboardInterrupt:
-        print("\n🛑 Aborted by user.")
+        logger.warning("Aborted by user.")
         git.run(["checkout", current_branch])
 
 if __name__ == "__main__":
